@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Interactive Plot</title>
+<!-- Load Plotly -->
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<style>
+  body {
+    margin: 0; 
+    padding: 0;
+    font-family: sans-serif;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+  }
+
+  #top-plot-area {
+    display: flex;
+    flex: 2;
+    align-items: center;
+    width: 100%;
+  }
+
+  #slider-container {
+    width: 40px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+  }
+
+  #vertical-slider {
+    writing-mode: bt-lr; 
+    -webkit-appearance: slider-vertical; 
+    height: 80%; 
+    margin: 0;
+  }
+
+  #time-plot, #psd-plot, #transfer-function-section {
+    flex: 1;
+    width: 100%;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <!-- Time-domain plot with slider -->
+  <div id="top-plot-area">
+    <div id="slider-container">
+      <input type="range" id="vertical-slider" orient="vertical" min="-1" max="1" value="0" step="0.01">
+    </div>
+    <div id="time-plot"></div>
+  </div>
+  
+  <!-- Frequency-domain PSD plot -->
+  <div id="psd-plot"></div>
+
+  <!-- Transfer function and reconstructed signal plot -->
+  <div id="transfer-function-section"></div>
+</div>
+
+<script>
+  // Sampling parameters
+  const fs = 40; // Hz
+  const duration = 5; // seconds
+  const N = fs * duration; // number of samples = 1000
+
+  // Initial data arrays
+  let timeData = Array(N).fill(0);
+  let timeArray = [...Array(N).keys()].map(i => i/fs);
+
+  // Plotly initial layout
+  const timeLayout = {
+    title: 'Time vs Amplitude',
+    xaxis: { title: 'Time (s)', range: [0, duration] },
+    yaxis: { title: 'Amplitude', range: [-1,1] },
+    autosize: true
+  };
+
+  const psdLayout = {
+    title: 'Frequency vs PSD (Welch)',
+    xaxis: { title: 'Frequency (Hz)' },
+    yaxis: { title: 'PSD' },
+    autosize: true
+  };
+
+  const transferLayout = {
+    title: 'Reconstructed Signal',
+    xaxis: { title: 'Time (s)' },
+    yaxis: { title: 'Amplitude', range: [-1,1] },
+    autosize: true
+  };
+
+  // Initialize plots
+  Plotly.newPlot('time-plot', [{
+    x: timeArray,
+    y: timeData,
+    mode: 'lines'
+  }], timeLayout);
+
+  Plotly.newPlot('psd-plot', [{
+    x: [],
+    y: [],
+    mode: 'lines'
+  }], psdLayout);
+
+  Plotly.newPlot('transfer-function-section', [{
+    x: timeArray,
+    y: timeData, 
+    mode: 'lines'
+  }], transferLayout);
+
+  const slider = document.getElementById('vertical-slider');
+  let isMouseDown = false;
+  let lastUpdate = performance.now();
+
+  slider.addEventListener('mousedown', () => {
+    isMouseDown = true;
+  });
+
+  document.addEventListener('mouseup', () => {
+    isMouseDown = false;
+    // Compute PSD using Welch's method and update
+    const fftResult = computeWelchPSD(timeData, fs);
+    Plotly.update('psd-plot', {x: [fftResult.freq], y: [fftResult.psd]});
+  });
+
+  // Capture at ~100Hz
+  function captureSlider() {
+    let now = performance.now();
+    if (isMouseDown && (now - lastUpdate) >= (1000/fs)) {
+      const val = parseFloat(slider.value);
+      // Shift data FIFO
+      timeData.shift();
+      timeData.push(val);
+      Plotly.update('time-plot', {y: [timeData]});
+      lastUpdate = now;
+    }
+    requestAnimationFrame(captureSlider);
+  }
+
+  captureSlider();
+
+  // Transfer function application (dummy)
+  function applyTransferFunction(data) {
+    return data.map((v,i) => v * (Math.sin(i/20) + 1)/2);
+  }
+
+  // Update reconstructed signal occasionally
+  setInterval(() => {
+    let reconstructed = applyTransferFunction(timeData);
+    Plotly.update('transfer-function-section', {y:[reconstructed]});
+  }, 1000);
+
+
+  // --- Welch's Method PSD Computation ---
+  // This is a simplified version of Welch's method:
+  // 1. Divide the time series into segments (with overlap).
+  // 2. Apply a window function to each segment.
+  // 3. Compute the periodogram of each windowed segment.
+  // 4. Average the periodograms to get the PSD.
+
+  function computeWelchPSD(data, fs) {
+    const segmentLength = 128; // for example
+    const overlap = segmentLength / 2;
+    const step = segmentLength - overlap;
+    const window = hannWindow(segmentLength);
+
+    let segments = [];
+    for (let start = 0; start + segmentLength <= data.length; start += step) {
+      const segment = data.slice(start, start + segmentLength);
+      segments.push(segment);
+    }
+
+    let psdSum = null;
+    let count = 0;
+
+    for (const seg of segments) {
+      const windowed = seg.map((v, i) => v * window[i]);
+      const fft = computeFFT(windowed);
+      // Compute power spectrum = |FFT|^2 / (fs * sum(window^2))
+      const winPower = window.reduce((acc, w) => acc + w*w, 0);
+      const scale = 1 / (fs * winPower);
+      const powerSpectrum = fft.slice(0, segmentLength/2).map(c => {
+        const mag = (c[0]*c[0] + c[1]*c[1]);
+        return mag * scale;
+      });
+
+      if (!psdSum) {
+        psdSum = powerSpectrum;
+      } else {
+        for (let i = 0; i < psdSum.length; i++) {
+          psdSum[i] += powerSpectrum[i];
+        }
+      }
+      count++;
+    }
+
+    const avgPSD = psdSum ? psdSum.map(v => v / count) : [];
+    const freq = avgPSD.map((_, i) => i * fs / segmentLength);
+
+    return {freq, psd: avgPSD};
+  }
+
+  function hannWindow(N) {
+    // Hann window w[n] = 0.5*(1 - cos(2*pi*n/(N-1)))
+    let w = [];
+    for (let n=0; n<N; n++) {
+      w.push(0.5 * (1 - Math.cos((2*Math.PI*n)/(N-1))));
+    }
+    return w;
+  }
+
+  // Simple FFT function placeholder.
+  // Returns an array of complex values: [[Re, Im], [Re, Im], ...].
+  // For real data, use a proper FFT library. Here we implement a basic Cooley-Tukey FFT for demonstration.
+  function computeFFT(input) {
+    // input is an array of real numbers
+    let N = input.length;
+    if (N <= 1) return [[input[0],0]];
+
+    // Bit-reversal permutation
+    let n = N, nu = Math.log2(N);
+    let x = input.map(v => [v, 0]);
+    let reverse = new Array(N);
+    for (let i = 0; i < N; i++) {
+      reverse[i] = 0;
+      for (let j = 0; j < nu; j++) {
+        if ((i >>> j) & 1) {
+          reverse[i] |= 1 << (nu - 1 - j);
+        }
+      }
+      if (reverse[i] > i) {
+        let temp = x[i];
+        x[i] = x[reverse[i]];
+        x[reverse[i]] = temp;
+      }
+    }
+
+    for (let s = 1; s <= nu; s++) {
+      let m = 1 << s;
+      let m2 = m >> 1;
+      let wStep = -2.0 * Math.PI / m;
+      for (let k = 0; k < N; k += m) {
+        for (let j = 0; j < m2; j++) {
+          let wReal = Math.cos(wStep * j);
+          let wImag = Math.sin(wStep * j);
+          let tReal = x[k+j+m2][0] * wReal - x[k+j+m2][1] * wImag;
+          let tImag = x[k+j+m2][0] * wImag + x[k+j+m2][1] * wReal;
+          let uReal = x[k+j][0];
+          let uImag = x[k+j][1];
+          x[k+j][0] = uReal + tReal;
+          x[k+j][1] = uImag + tImag;
+          x[k+j+m2][0] = uReal - tReal;
+          x[k+j+m2][1] = uImag - tImag;
+        }
+      }
+    }
+
+    return x;
+  }
+
+</script>
+</body>
+</html>
